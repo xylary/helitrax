@@ -11,21 +11,21 @@ logging.basicConfig(filename='log/orchestrator.log',level=logging.INFO)
 hyperparams = {
     'num_classes': ['2'],
     'num_hidden': ['10', '50', '100', '150', '200', '500'],
-    'num_layers': ['2', '3', '4'],
+    'num_layers': ['2', '3'],
     'batch_size': ['50', '100', '200'],
     'sequence_length': ['25'],  # Note this must match the dataset
-    #'num_epochs': ['1000', '3000', '5000'],
-    'num_epochs': ['100'],
+    'num_epochs': ['1000', '3000', '5000'],
+    #'num_epochs': ['10'],
     'max_grad_norm': ['3.0', '5.0'],
-    'pos_weight': ['0.01', '0.03', '0.1', '0.3', '1.0', '1.5', '2.0', '3.0'],
-    'learning_rate': ['2e-3', '5e-3', '8e-3']
+    'pos_weight': ['0.1', '0.3', '1.0', '1.5', '2.0', '3.0'],
+    'learning_rate': ['2e-3', '5e-3', '8e-3', '2e-2']
 }
 
 csvfiles = glob.glob("training_data2/*.csv")
 
 results = {}
 bestf1 = 0.0
-for i in range(2):
+for i in range(200):
     args = []
     for k in hyperparams.keys():
         args.append('--'+k)
@@ -40,9 +40,16 @@ for i in range(2):
         for csv in csvfiles:
             args.append(csv)
         res = gridlstm.train_and_test(args)
-        if res['test']['F1'] > bestf1:
-            bestf1 = res['test']['F1']
-            logging.info('New best F1 on test set:', bestf1)
         logging.info(res)
+        if 'error' in res.keys():
+            logging.info(res['error'])
+        else:
+            if ('F1' in res['test'].keys()) and (type(res['test']['F1']) == float) \
+                and (res['test']['F1'] > bestf1):
+                bestf1 = res['test']['F1']
+                logging.info('New best F1 on test set: %f' % bestf1)
+
         results[key] = res
-logging.info('Best F1 score:', bestf1)
+        logging.info('Results test %d: %s' % (i, res))
+
+        logging.info('Best F1 score: %f' % bestf1)

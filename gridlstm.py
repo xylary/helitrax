@@ -10,6 +10,8 @@ import datetime
 import math
 import random
 
+logger = logging.getLogger(__name__)
+
 class BatchDataHelper:
     def __init__(self, csvfiles, batch_size, sequence_length, train_pct=0.80, num_classes=2,
         max_csvfiles=20):
@@ -22,13 +24,13 @@ class BatchDataHelper:
         self.num_classes = num_classes
         self.num_features = 0
 
-        assert(len(csvfiles) > 0), logging.error('Empty list of csvfiles')
+        assert(len(csvfiles) > 0), logger.error('Empty list of csvfiles')
 
         self._ptr = {'train': (self.csvfiles[0], 0),
                      'test':  (self.csvfiles[0], 0)}
 
         y_pos_counts = {}
-        logging.info('Loading %d dataframes' % len(csvfiles))
+        logger.info('Loading %d dataframes' % len(csvfiles))
         for csv in csvfiles:
             df = pd.read_csv(csv, index_col=0)
 
@@ -44,7 +46,7 @@ class BatchDataHelper:
             training_set_size = int((int(len(df) * 0.8) / batch_size) * batch_size)
             self._df['train'][csv] = df[:training_set_size]
             self._df['test'][csv] = df[training_set_size:]
-            #logging.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
+            #logger.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
             #    len(self._df['test'][csv])))
 
         # Truncate csvfiles to the subset with the most positive examples
@@ -56,15 +58,15 @@ class BatchDataHelper:
             for i in range(len(sortedcsvs)):
                 csv = sortedcsvs[i]
                 if i < max_csvfiles:
-                    logging.info('%s: %d' % (csv, y_pos_counts[csv]))
+                    logger.info('%s: %d' % (csv, y_pos_counts[csv]))
                 else:
                     del self._df['train'][csv]
                     del self._df['test'][csv]
             self.csvfiles = sortedcsvs[:max_csvfiles]
 
-        logging.info('Truncated to the following %d csvs:' % max_csvfiles)
+        logger.info('Truncated to the following %d csvs:' % max_csvfiles)
         for csv in self.csvfiles:
-            logging.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
+            logger.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
                 len(self._df['test'][csv])))
         self.num_features = len(df.columns) - num_classes
 
@@ -129,7 +131,7 @@ class BatchDataHelper:
 
         self._ptr[which] = (csv, offset)
         if verbose:
-            logging.info('Batch: %s, %d' % (csv, offset))
+            logger.info('Batch: %s, %d' % (csv, offset))
 
         # Should never hit either of these cases
         if len(X_batch) != self.batch_size:
@@ -201,8 +203,8 @@ def evaluate_performance(model, actual_classes, session, feed_dict):
     return (tp, tn, fp, fn)
 
 def performance_metrics(tp, tn, fp, fn):
-    logging.info('Positives: true=%d false=%d' % (int(tp), int(fp)))
-    logging.info('Negatives: true=%d false=%d' % (int(tn), int(fn)))
+    logger.info('Positives: true=%d false=%d' % (int(tp), int(fp)))
+    logger.info('Negatives: true=%d false=%d' % (int(tn), int(fn)))
 
     tpr = float(tp)/(float(tp) + float(fn))
     fpr = float(fp)/(float(tp) + float(fn))
@@ -211,24 +213,25 @@ def performance_metrics(tp, tn, fp, fn):
 
     recall = tpr
     if tp+fp == 0:
-        logging.info('No positives')
-        return
+        logger.info('No positives')
+        return {'error': 'No positives'}
 
     precision = float(tp)/(float(tp) + float(fp))
-    logging.info('Precision = %f' % precision)
-    logging.info('Recall = %f' % recall)
+    logger.info('Precision = %f' % precision)
+    logger.info('Recall = %f' % recall)
     metrics = {}
     metrics['precision'] = precision
     metrics['recall'] = recall
     if (precision + recall) == 0:
-        logging.info('F1 Score = Nan')
+        logger.info('F1 Score = Nan')
         metrics['F1'] = 'NaN'
     else:
         f1_score = (2 * (precision * recall)) / (precision + recall)
-        logging.info('F1 Score = %f' % f1_score)
-        metrics['F1'] = f1_score
-    logging.info('Accuracy = %f' % accuracy)
+        logger.info('F1 Score = %f' % f1_score)
+        metrics['F1'] = float(f1_score)
+    logger.info('Accuracy = %f' % accuracy)
     metrics['accuracy'] = accuracy
+    return metrics
 
 def train_and_test(arguments):
 
@@ -264,18 +267,17 @@ def train_and_test(arguments):
     if not os.path.exists(args.output_dir):
         os.mkdir(args.output_dir)
 
-    logging.basicConfig(filename=os.path.join(args.output_dir, 'gridlstm_%s.log' % args.description.replace(' ','_')),level=logging.DEBUG)
-    logger = logging.getLogger('gridlstm')
-    logger.setLevel(logging.WARN)
-
+    fh = logging.FileHandler(os.path.join(args.output_dir, 'gridlstm_%s.log' % args.description.replace(' ','_')))
+    logger.addHandler(fh)
+    logger.setLevel(logging.INFO)
 
     for k, v in vars(args).items():
         if k != 'csvfiles':
-            logging.info('%s: %s' % (k, v))
-    logging.info('csv files:')
+            logger.info('%s: %s' % (k, v))
+    logger.debug('csv files:')
     for csv in args.csvfiles:
-        logging.info(csv)
-    logging.info('end of csv files')
+        logger.debug(csv)
+    logger.debug('end of csv files')
 
     # Load data
     csvfiles = args.csvfiles
@@ -288,7 +290,7 @@ def train_and_test(arguments):
 
     ###################
     # Construct the RNN
-
+    tf.reset_default_graph()
     # Tensorflow requires input as a tensor (a Tensorflow variable) of the
     # dimensions [batch_size, sequence_length, input_dimension] (a 3d variable).
     # [Batch Size, Sequence Length, Input Dimension]. We let the batch size be unknown and to be determined at runtime
@@ -303,9 +305,9 @@ def train_and_test(arguments):
     #      state: state Tensor, 2D, batch x state_size. Note that state_size =
     #        cell_state_size * recurrent_dims
     #      scope: VariableScope for the created subgraph; defaults to "GridRNNCell".
-    logging.info('LSTM input size: %s' % lstm_cell.input_size)
-    logging.info('LSTM output size: %s' % lstm_cell.output_size)
-    logging.info('LSTM state size: %s' % lstm_cell.state_size)
+    logger.info('LSTM input size: %s' % lstm_cell.input_size)
+    logger.info('LSTM output size: %s' % lstm_cell.output_size)
+    logger.info('LSTM state size: %s' % lstm_cell.state_size)
     lstm_output_size = lstm_cell.output_size
 
     # Create multiple layers
@@ -364,7 +366,7 @@ def train_and_test(arguments):
     writer = tf.train.SummaryWriter(os.path.join(args.output_dir, args.description), session.graph)
 
     # Train the model
-    logging.info('Training model...')
+    logger.info('Training model...')
     helper.rewind()
     for i in range(args.num_epochs):
         X_batch, y_batch = helper.next_batch('train', repeat=True, verbose=False, rotate=True)
@@ -389,7 +391,7 @@ def train_and_test(arguments):
         del y_batch
 
     # Evaluate performance over the entire training set
-    logging.info('Evaluating model performance on training set...')
+    logger.info('Evaluating model performance on training set...')
     scores = [0,0,0,0]
     helper.rewind()
     results = {
@@ -397,7 +399,7 @@ def train_and_test(arguments):
         'test': {}
     }
     while True:
-        X_batch, y_batch = helper.next_batch('train', repeat=False, verbose=True)
+        X_batch, y_batch = helper.next_batch('train', repeat=False, verbose=False)
         if (X_batch is None) or (y_batch is None):
             break
 
@@ -417,11 +419,11 @@ def train_and_test(arguments):
         results['train'][k] = mets[k]
 
     # Evaluate performance over the entire test set
-    logging.info('Evaluating model performance on test set...')
+    logger.info('Evaluating model performance on test set...')
     scores = [0,0,0,0]
     helper.rewind()
     while True:
-        X_batch, y_batch = helper.next_batch('test', repeat=False, verbose=True)
+        X_batch, y_batch = helper.next_batch('test', repeat=False, verbose=False)
         if (X_batch is None) or (y_batch is None):
             break
 
@@ -430,7 +432,7 @@ def train_and_test(arguments):
               actual_classes: y_batch
         })
         scores[0] += tp; scores[1] += tn; scores[2] += fp; scores[3] += fn
-        print(scores)
+        #print(scores)
         del X_batch
         del y_batch
     performance_metrics(*scores)
