@@ -13,7 +13,7 @@ import random
 logger = logging.getLogger(__name__)
 
 class BatchDataHelper:
-    def __init__(self, csvfiles, batch_size, sequence_length, train_pct=0.80, num_classes=2,
+    def __init__(self, csvfiles, batch_size, sequence_length, train_pct=0.60, num_classes=2,
         max_csvfiles=20):
         self._df = {'train': {},
                     'test': {}}
@@ -30,7 +30,7 @@ class BatchDataHelper:
                      'test':  (self.csvfiles[0], 0)}
 
         y_pos_counts = {}
-        logger.info('Loading %d dataframes' % len(csvfiles))
+        logger.debug('Loading %d dataframes' % len(csvfiles))
         for csv in csvfiles:
             df = pd.read_csv(csv, index_col=0)
 
@@ -43,11 +43,13 @@ class BatchDataHelper:
 
             # Split into train & test. Note - these are different time series so
             # we need to keep them separate. We will batch them in order.
-            training_set_size = int((int(len(df) * 0.8) / batch_size) * batch_size)
+            training_set_size = int((int(len(df) * train_pct) / batch_size) * batch_size)
             self._df['train'][csv] = df[:training_set_size]
             self._df['test'][csv] = df[training_set_size:]
             #logger.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
             #    len(self._df['test'][csv])))
+            if self._df['test'][csv]['ypos'].sum() == 0:
+                logger.error('No positives in test set!! %s' % csv)
 
         # Truncate csvfiles to the subset with the most positive examples
         # NOTE - this is probably not good practice in general since it biases
@@ -58,16 +60,16 @@ class BatchDataHelper:
             for i in range(len(sortedcsvs)):
                 csv = sortedcsvs[i]
                 if i < max_csvfiles:
-                    logger.info('%s: %d' % (csv, y_pos_counts[csv]))
+                    logger.debug('%s: %d' % (csv, y_pos_counts[csv]))
                 else:
                     del self._df['train'][csv]
                     del self._df['test'][csv]
             self.csvfiles = sortedcsvs[:max_csvfiles]
+            logger.info('Truncated to the following %d csvs: %s' % (max_csvfiles, self.csvfiles))
 
-        logger.info('Truncated to the following %d csvs:' % max_csvfiles)
-        for csv in self.csvfiles:
-            logger.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
-                len(self._df['test'][csv])))
+        #for csv in self.csvfiles:
+        #    logger.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
+        #        len(self._df['test'][csv])))
         self.num_features = len(df.columns) - num_classes
 
 
@@ -206,15 +208,17 @@ def performance_metrics(tp, tn, fp, fn):
     logger.info('Positives: true=%d false=%d' % (int(tp), int(fp)))
     logger.info('Negatives: true=%d false=%d' % (int(tn), int(fn)))
 
+    if (tp+fp == 0) or (tp+fn == 0):
+        logger.info('No positives')
+        return {'error': 'No positives'}
+
     tpr = float(tp)/(float(tp) + float(fn))
     fpr = float(fp)/(float(tp) + float(fn))
 
     accuracy = (float(tp) + float(tn))/(float(tp) + float(fp) + float(fn) + float(tn))
 
     recall = tpr
-    if tp+fp == 0:
-        logger.info('No positives')
-        return {'error': 'No positives'}
+
 
     precision = float(tp)/(float(tp) + float(fp))
     logger.info('Precision = %f' % precision)
@@ -268,12 +272,14 @@ def train_and_test(arguments):
         os.mkdir(args.output_dir)
 
     fh = logging.FileHandler(os.path.join(args.output_dir, 'gridlstm_%s.log' % args.description.replace(' ','_')))
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
     logger.addHandler(fh)
     logger.setLevel(logging.INFO)
 
     for k, v in vars(args).items():
         if k != 'csvfiles':
-            logger.info('%s: %s' % (k, v))
+            logger.debug('%s: %s' % (k, v))
     logger.debug('csv files:')
     for csv in args.csvfiles:
         logger.debug(csv)
@@ -305,9 +311,9 @@ def train_and_test(arguments):
     #      state: state Tensor, 2D, batch x state_size. Note that state_size =
     #        cell_state_size * recurrent_dims
     #      scope: VariableScope for the created subgraph; defaults to "GridRNNCell".
-    logger.info('LSTM input size: %s' % lstm_cell.input_size)
-    logger.info('LSTM output size: %s' % lstm_cell.output_size)
-    logger.info('LSTM state size: %s' % lstm_cell.state_size)
+    logger.debug('LSTM input size: %s' % lstm_cell.input_size)
+    logger.debug('LSTM output size: %s' % lstm_cell.output_size)
+    logger.debug('LSTM state size: %s' % lstm_cell.state_size)
     lstm_output_size = lstm_cell.output_size
 
     # Create multiple layers
@@ -435,7 +441,7 @@ def train_and_test(arguments):
         #print(scores)
         del X_batch
         del y_batch
-    performance_metrics(*scores)
+    mets = performance_metrics(*scores)
     results['test']['tp'] = scores[0]
     results['test']['tn'] = scores[1]
     results['test']['fp'] = scores[2]
