@@ -27,7 +27,10 @@ def range_vs_close(o,h,l,c,v):
     return full_range(o,h,l,c,v)/c
 
 def body_vs_range(o,h,l,c,v):
-    return real_body(o,h,l,c,v) / full_range(o,h,l,c,v)
+    if full_range(o,h,l,c,v) == 0:
+        return 0.0
+    else:
+        return real_body(o,h,l,c,v) / full_range(o,h,l,c,v)
 
 def lower_wick_at_least_twice_real_body(o,h,l,c,v):
     return int(lower_wick(o,h,l,c,v) >= 2 * real_body(o,h,l,c,v))
@@ -42,6 +45,7 @@ def is_hammer(o,h,l,c,v):
 ohlcv_functions = [closed_in_top_half_of_range,
                    closed_in_bottom_half_of_range,
                    range_vs_close,
+                   real_body,
                    body_vs_range,
                    lower_wick_at_least_twice_real_body,
                    upper_wick_at_least_twice_real_body,
