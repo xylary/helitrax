@@ -13,7 +13,7 @@ import random
 logger = logging.getLogger(__name__)
 
 class BatchDataHelper:
-    def __init__(self, csvfiles, batch_size, sequence_length, train_pct=0.60, num_classes=2,
+    def __init__(self, csvfiles, batch_size, sequence_length, train_pct=0.70, num_classes=2,
         max_csvfiles=20):
         self._df = {'train': {},
                     'test': {}}
@@ -44,10 +44,11 @@ class BatchDataHelper:
             # Split into train & test. Note - these are different time series so
             # we need to keep them separate. We will batch them in order.
             training_set_size = int((int(len(df) * train_pct) / batch_size) * batch_size)
+            #logger.info('Training set size: %d' % training_set_size)
             self._df['train'][csv] = df[:training_set_size]
             self._df['test'][csv] = df[training_set_size:]
-            #logger.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
-            #    len(self._df['test'][csv])))
+            logger.info('%s: train[%d] test[%d]' % (csv, len(self._df['train'][csv]),
+                len(self._df['test'][csv])))
             if self._df['test'][csv]['ypos'].sum() == 0:
                 logger.error('No positives in test set!! %s' % csv)
 
@@ -78,7 +79,7 @@ class BatchDataHelper:
                      'test':  (self.csvfiles[0], 0)}
 
 
-    def next_batch(self, which='train', repeat=False, verbose=False, rotate=True):
+    def next_batch(self, which='train', repeat=False, verbose=False, rotate=False):
         """Returns X_batch, y_batch or None if finished. If repeat=True,
         will continue returning data."""
 
@@ -208,22 +209,28 @@ def performance_metrics(tp, tn, fp, fn):
     logger.info('Positives: true=%d false=%d' % (int(tp), int(fp)))
     logger.info('Negatives: true=%d false=%d' % (int(tn), int(fn)))
 
+    # preload defaults
+    metrics = {}
+    metrics['accuracy'] = 0
+    metrics['precision'] = 0
+    metrics['F1'] = np.NaN
+    metrics['recall'] = 0
+
     if (tp+fp == 0) or (tp+fn == 0):
         logger.info('No positives')
-        return {'error': 'No positives'}
+        metrics['error'] = 'No positives'
+        return metrics
 
     tpr = float(tp)/(float(tp) + float(fn))
     fpr = float(fp)/(float(tp) + float(fn))
 
     accuracy = (float(tp) + float(tn))/(float(tp) + float(fp) + float(fn) + float(tn))
-
     recall = tpr
-
 
     precision = float(tp)/(float(tp) + float(fp))
     logger.info('Precision = %f' % precision)
     logger.info('Recall = %f' % recall)
-    metrics = {}
+
     metrics['precision'] = precision
     metrics['recall'] = recall
     if (precision + recall) == 0:
@@ -263,9 +270,29 @@ def train_and_test(arguments):
                         help='weight for positive classification in cross-entropy loss')
     parser.add_argument('--learning_rate', type=float, default=5e-3,
                         help='eta passed to optimizer constructor')
+    parser.add_argument('--fake', dest='fake', action='store_true', default=False)
     parser.add_argument('csvfiles', nargs='+',
                         help='csv file(s) containing training data')
     args = parser.parse_args(arguments)
+
+    # Fake mode for debugging purposes
+    if args.fake:
+        results = [
+        #1
+        {'test': {'precision': random.random(), 'accuracy': random.random(), 'tn': 388.0, 'fn': 4.0,
+        'recall': 0.0, 'F1': random.random(), 'tp': 0.0, 'fp': 8.0},
+        'train': {'precision': random.random(), 'accuracy': random.random(),
+        'tn': 1061.0, 'fn': 29.0, 'recall': random.random(), 'F1': random.random(), 'tp': 100.0, 'fp': 10.0}},
+        #2
+        {'train': {'tn': 2191.0, 'recall': 0.5270935960591133, 'fp': 6.0, 'accuracy': 0.9575, 'precision': 0.9469026548672567,
+        'F1': 0.6772151898734177, 'tp': 107.0, 'fn': 96.0}, 'test': {'tn': 939.0, 'recall': 0.03125,
+        'fp': 29.0, 'accuracy': 0.94, 'precision': 0.03333333333333333, 'F1': 0.03225806451612904, 'tp': 1.0, 'fn': 31.0}},
+        #3
+        {'train': {'tn': 2196.0, 'recall': 0.9753694581280788, 'fp': 1.0, 'accuracy': 0.9975, 'precision': 0.9949748743718593,
+        'F1': 0.9850746268656716, 'tp': 198.0, 'fn': 5.0}, 'test': {'tn': 933.0, 'recall': 0.0, 'fp': 40.0,
+        'accuracy': 0.933, 'precision': 0.0, 'F1': 'NaN', 'tp': 0.0, 'fn': 27.0}}
+        ]
+        return random.choice(results)
 
     # Make log dir if needed
     if not os.path.exists(args.output_dir):
@@ -375,7 +402,8 @@ def train_and_test(arguments):
     logger.info('Training model...')
     helper.rewind()
     for i in range(args.num_epochs):
-        X_batch, y_batch = helper.next_batch('train', repeat=True, verbose=False, rotate=True)
+        # TODO - figure out why the tensorboard is showing that we stop at ~800 samples. Is repeat not working?
+        X_batch, y_batch = helper.next_batch('train', repeat=True, verbose=False, rotate=False)
         session.run(
             training_step,
             feed_dict={
@@ -405,7 +433,7 @@ def train_and_test(arguments):
         'test': {}
     }
     while True:
-        X_batch, y_batch = helper.next_batch('train', repeat=False, verbose=False)
+        X_batch, y_batch = helper.next_batch('train', repeat=False, verbose=False, rotate=False)
         if (X_batch is None) or (y_batch is None):
             break
 
@@ -429,7 +457,7 @@ def train_and_test(arguments):
     scores = [0,0,0,0]
     helper.rewind()
     while True:
-        X_batch, y_batch = helper.next_batch('test', repeat=False, verbose=False)
+        X_batch, y_batch = helper.next_batch('test', repeat=False, verbose=False, rotate=False)
         if (X_batch is None) or (y_batch is None):
             break
 
@@ -450,6 +478,7 @@ def train_and_test(arguments):
         results['test'][k] = mets[k]
 
     session.close()
+    del helper
 
     return results
 
