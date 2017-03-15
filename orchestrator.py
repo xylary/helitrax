@@ -12,14 +12,14 @@ logging.basicConfig(filename='log/orchestrator.log',level=logging.INFO)
 
 hyperparams_multiple = {
     'num_classes': ['2'],
-    'num_hidden': ['10', '50', '100', '150', '200', '500'],
+    'num_hidden': ['10', '100'],
     'num_layers': ['2'],
-    'batch_size': ['50', '100', '200'],
+    'batch_size': ['200', '400'],
     'sequence_length': ['20'],  # Note this must match the dataset
     'num_epochs': ['1000', '3000'],
-    'max_grad_norm': ['3.0', '5.0'],
+    'max_grad_norm': ['2.0', '3.0'],
     'pos_weight': ['0.3', '1.0', '2.0'],
-    'learning_rate': ['2e-3', '5e-3', '2e-2']
+    'learning_rate': ['2e-3', '5e-3']
 }
 
 hyperparams_single = {
@@ -79,6 +79,9 @@ def build_args(hyperparams, csvfiles, description, randomize=False, quickTest=Fa
             args.append(random.choice(hyperparams[k]))
         else:
             args.append(hyperparams[k][0])
+    args.append('--description')
+    args.append(description)
+
     if fakeMode:
         # Fake for quick debugging
         args.append('--fake')
@@ -101,7 +104,7 @@ def main():
         perms = 1
         for k, v in hyperparams_multiple.items():
             perms *= len(v)
-        testrange = range(perms*2)
+        testrange = range(perms*2*len(csvfiles))
     else:
         testrange = range(len(csvfiles))
 
