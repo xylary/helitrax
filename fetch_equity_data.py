@@ -1,0 +1,120 @@
+import string
+import logging
+import time
+import sys
+sys.path.append('/Users/danielknopf/github/tdameritrade')
+import tdapi
+from tdapi import TDAmeritradeAPI
+import datetime
+import keyring
+import numpy as np
+import pandas as pd
+import progressbar
+import feature_extraction
+
+
+logging.basicConfig(filename='fetch_equity_data.log',level=logging.INFO)
+
+def get_price_history(td, tickers, days=108):
+    price_dataframes = {}
+    failed = []
+    bar = progressbar.ProgressBar()
+    for i in bar(range(len(tickers))):
+        ticker = tickers[i]
+        dt = datetime.datetime.now()
+        first = True
+
+        logging.info('%s: %s' % (ticker, dt.strftime('%Y%m%d')))
+        try:
+            df = td.getPriceHistory(ticker, intervalType='DAILY', intervalDuration='1', periodType='MONTH',
+                period='3', startdate=None, enddate=dt.strftime('%Y%m%d'), extended=None)
+        except ValueError:
+            logging.info('Failed: %s' % ticker)
+            failed.append(ticker)
+            continue
+
+        #fname = 'ohlcdata/%s_price_%s_%s.csv' % (ticker, fulldf.timestamp.min().date().strftime('%Y%m%d'), fulldf.timestamp.max().date().strftime('%Y%m%d'))
+        #fulldf = fulldf.set_index(fulldf.timestamp, drop=False, inplace=False, verify_integrity=True).drop('timestamp',1)
+        #fulldf.to_csv(fname)
+        price_dataframes[ticker] = df
+
+
+    logging.info('Failed tickers:')
+    for ticker in failed:
+        logging.info(ticker)
+
+    return price_dataframes
+
+
+def main():
+
+    sequence_length = 20 # TODO - make this a flag
+    batch_size = 200
+
+    fp = open('tickers')
+    lines = fp.readlines()[1:]
+    fp.close()
+
+    lines = [i.strip().split() for i in lines]
+    tickers = [i[0] for i in lines]
+    #logging.info(tickers)
+
+    tickers = sorted(tickers)
+
+    pw = keyring.get_password('tdameritrade','dgregknopf')
+    td = TDAmeritradeAPI('GRNO')
+    td.login('dgregknopf',pw)
+
+    # Get price data
+    dfs = get_price_history(td, tickers)
+
+    # Extract features and drop initial columns
+    for key, df in dfs.items():
+        df = feature_extraction.add_features(df, prune=False)
+
+        df.drop('timestamp', axis=1, inplace=True)
+        df.drop('open', axis=1, inplace=True)
+        df.drop('high', axis=1, inplace=True)
+        df.drop('low', axis=1, inplace=True)
+        df.drop('close', axis=1, inplace=True)
+        df.drop('volume', axis=1, inplace=True)
+
+        dfs[key] = df[:sequence_length]
+        #dfs[key].to_csv('newdata/%s.csv' % key)
+
+    num_features = dfs.values()[0].shape[1]
+    expected_shape = (sequence_length, num_features)
+
+    frames = []
+    keys = sorted(dfs.keys())
+    valid = []
+    for key in keys:
+        if dfs[key].values.shape == expected_shape:
+            frames.append(dfs[key].values)
+            valid.append(key)
+        else:
+            print('Unexpected shape: %s: %s' % (key, dfs[key].values.shape))
+
+    if (len(frames) % batch_size) != 0:
+        pad = [np.zeros(frames[0].shape)] * (batch_size - (len(frames) % batch_size))
+        import pdb; pdb.set_trace()
+        frames = np.concatenate((frames, pad))
+
+    X_input = np.transpose(frames, [1,0,2])
+
+    tag = datetime.datetime.now().strftime('%Y%m%d')
+    np.save('X_input_data_%s' % tag, X_input)
+    fp = open('X_input_tickers_%s' % tag, 'w')
+    fp.write('\n'.join(valid))
+    fp.close()
+
+    #while len(frames) > 0:
+    #    X_slice = frames[:batch_size]
+    #    frames = frames[batch_size:]
+    #    X_batch = np.transpose(X_slice, [1,0,2])
+
+    #import pdb; pdb.set_trace()
+
+
+if __name__ == '__main__':
+    main()

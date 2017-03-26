@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from tensorflow.contrib import grid_rnn
+import tensorflow.contrib.rnn as rnn
 import argparse
 import logging
 import os
@@ -9,6 +9,14 @@ import os.path
 import datetime
 import math
 import random
+from tensorflow import compat
+from tensorflow.python.saved_model import builder as saved_model_builder
+from tensorflow.python.saved_model import loader as saved_model_loader
+from tensorflow.python.saved_model import tag_constants
+from tensorflow.python.saved_model import signature_constants
+from tensorflow.python.saved_model import signature_def_utils
+from tensorflow.python.saved_model import utils
+
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +155,13 @@ class BatchDataHelper:
             if y_batch[row][0] == 0 and y_batch[row][1] == 0:
                 raise ValueError('y_batch has no valid class @ row %d' % row)
 
+        # NOTE: TensorFlow 1.0 compatibility -- reshape batches
+        X_batch = np.transpose(X_batch, [1,0,2])
+
         return X_batch, y_batch
+
+
+
 
 def evaluate_performance(model, actual_classes, session, feed_dict):
     predictions = tf.argmax(model, 1)
@@ -244,36 +258,107 @@ def performance_metrics(tp, tn, fp, fn):
     metrics['accuracy'] = accuracy
     return metrics
 
-def train_and_test(arguments):
 
-    # Load arguments
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--description', type=str, default='%s' % datetime.datetime.now().isoformat(),
-                        help='descriptive name for this particular run')
-    parser.add_argument('--output_dir', type=str, default='log',
-                        help='directory to store logs and models')
-    parser.add_argument('--num_classes', type=int, default=2,
-                        help='number of classes in the dataset - note these will be the first columns')
-    parser.add_argument('--num_hidden', type=int, default=100,
-                        help='size of RNN hidden state')
-    parser.add_argument('--num_layers', type=int, default=2,
-                        help='number of layers in the RNN')
-    parser.add_argument('--batch_size', type=int, default=200,
-                        help='minibatch size')
-    parser.add_argument('--sequence_length', type=int, default=20,
-                        help='RNN sequence length')
-    parser.add_argument('--num_epochs', type=int, default=5000,
-                        help='number of epochs')
-    parser.add_argument('--max_grad_norm', type=float, default=5.,
-                        help='clip gradients at this value')
-    parser.add_argument('--pos_weight', type=float, default=0.03,
-                        help='weight for positive classification in cross-entropy loss')
-    parser.add_argument('--learning_rate', type=float, default=5e-3,
-                        help='eta passed to optimizer constructor')
-    parser.add_argument('--fake', dest='fake', action='store_true', default=False)
-    parser.add_argument('csvfiles', nargs='+',
-                        help='csv file(s) containing training data')
-    args = parser.parse_args(arguments)
+class TimeSeriesClassifier:
+    def __init__(self, args, num_features):
+
+        ###################
+        # Construct the RNN
+        #tf.reset_default_graph()
+        # Tensorflow requires input as a tensor (a Tensorflow variable) of the
+        # dimensions [sequence_length, batch_size, input_dimension] (a 3d variable)
+        with tf.name_scope('Inputs') as scope:
+            feature_data = tf.placeholder(tf.float32, [args.sequence_length, args.batch_size, num_features])
+            actual_classes = tf.placeholder(tf.float32, [args.batch_size, args.num_classes])
+
+        # Create GridLSTM
+        # inputs: input Tensor, 2D, batch x input_size. Or None
+        #      state: state Tensor, 2D, batch x state_size. Note that state_size =
+        #        cell_state_size * recurrent_dims
+        #      scope: VariableScope for the created subgraph; defaults to "rnn".
+
+        # Create multiple layers
+        lstm_cell = rnn.BasicLSTMCell(args.num_hidden, state_is_tuple=True)
+        lstm_cell = rnn.MultiRNNCell([lstm_cell] * args.num_layers, state_is_tuple=True)
+        lstm_output_size = lstm_cell.output_size
+
+        rnn_input = tf.unstack(feature_data, num=args.sequence_length, axis=0)
+        outputs, state = rnn.static_rnn(lstm_cell, rnn_input, dtype=tf.float32)
+        last_output = outputs[-1]
+
+        # Feed the output of the LSTM into a softmax layer
+        with tf.name_scope('Softmax') as scope:
+            weights = tf.Variable(tf.truncated_normal([lstm_output_size, args.num_classes], stddev=0.01))
+            biases = tf.Variable(tf.ones([args.num_classes]))
+            scores = tf.matmul(last_output, weights) + biases
+            classes = tf.nn.softmax(scores)
+
+        with tf.name_scope('Cost_Evaluation') as scope:
+            # Use weighted cross entropy cost function since our dataset is relatively sparse.
+            # We need to be able to dial in the penalty of missing a positive classification
+            # so that the model doesn't always predict negatives.
+            #loss = tf.nn.weighted_cross_entropy_with_logits(logits, actual_classes, args.pos_weight, name='Weighted_cross_entropy')
+            loss = tf.losses.sigmoid_cross_entropy(actual_classes, scores, weights=args.pos_weight)
+            cost = tf.reduce_mean(loss)
+
+        # Dimensions (assuming num_classes=2, hidden_size=24)
+        # actual_classes has shape [batch_size, 2] where the 2 y columns are y_pos and y_neg
+        # weights: [24, 2], seeded by random distribution
+        # biases [2]
+        # what is shape of model?
+        # output*weights is [batch_size x 24] X [24, 2] --> [batch_size x 2]
+        with tf.name_scope('Optimizer') as scope:
+            # Create an Adam optimizer and connect it to the cost function node
+            tvars = tf.trainable_variables()
+            grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),args.max_grad_norm)
+            optimizer = tf.train.AdamOptimizer(args.learning_rate)
+            gradients = zip(grads, tvars)
+            training_step = optimizer.apply_gradients(gradients)
+
+        with tf.name_scope('Accuracy_Evaluation') as scope:
+            # Add ops to evaluate accuracy
+            correct_prediction = tf.equal(tf.argmax(classes, 1), tf.argmax(actual_classes, 1))
+            accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
+            cost_summary = tf.summary.scalar("cost", cost)
+            training_summary = tf.summary.scalar("training_accuracy", accuracy)
+
+        # Properties
+        self.classes = classes # classifier output - predicted classes
+        self.scores = scores # classifier output - scores
+        self.training_step = training_step
+        self.feature_data = feature_data
+        self.actual_classes = actual_classes
+        self.cost_summary = cost_summary
+        self.training_summary = training_summary
+
+    def export(self, session, path, description, version=1):
+        export_path_base = sys.argv[-1]
+        export_path = os.path.join(
+            compat.as_bytes(path), compat.as_bytes('models'),
+            compat.as_bytes(str(description+'_%d'%version)))
+        while os.path.exists(export_path):
+            version += 1
+            export_path = os.path.join(
+                compat.as_bytes(path), compat.as_bytes('models'),
+                compat.as_bytes(str(description+'_%d'%version)))
+
+        logger.info('Exporting trained model to %s' % export_path)
+        builder = saved_model_builder.SavedModelBuilder(export_path)
+
+        classification_signature = signature_def_utils.classification_signature_def(
+            self.feature_data, self.classes, self.scores)
+
+        legacy_init_op = tf.group(
+            tf.tables_initializer(), name='legacy_init_op')
+        builder.add_meta_graph_and_variables(
+            session, [tag_constants.SERVING],
+            signature_def_map={
+                'classify': classification_signature,
+            })
+        builder.save()
+
+
+def train_and_test(session, args, helper):
 
     # Fake mode for debugging purposes
     if args.fake:
@@ -294,109 +379,14 @@ def train_and_test(arguments):
         ]
         return random.choice(results)
 
-    # Make log dir if needed
-    if not os.path.exists(args.output_dir):
-        os.mkdir(args.output_dir)
 
-    fh = logging.FileHandler(os.path.join(args.output_dir, 'gridlstm_%s.log' % args.description.replace(' ','_')))
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
-    logger.setLevel(logging.INFO)
+    # Construct model
+    classifier = TimeSeriesClassifier(args, helper.num_features)
 
-    for k, v in vars(args).items():
-        if k != 'csvfiles':
-            logger.debug('%s: %s' % (k, v))
-    logger.debug('csv files:')
-    for csv in args.csvfiles:
-        logger.debug(csv)
-    logger.debug('end of csv files')
-
-    # Load data
-    csvfiles = args.csvfiles
-    batch_size = args.batch_size
-    num_classes = args.num_classes
-    sequence_length = args.sequence_length
-    helper = BatchDataHelper(csvfiles, batch_size, sequence_length, num_classes=num_classes)
-    num_features = helper.num_features
-
-
-    ###################
-    # Construct the RNN
-    tf.reset_default_graph()
-    # Tensorflow requires input as a tensor (a Tensorflow variable) of the
-    # dimensions [batch_size, sequence_length, input_dimension] (a 3d variable).
-    # [Batch Size, Sequence Length, Input Dimension]. We let the batch size be unknown and to be determined at runtime
-    with tf.name_scope('Inputs') as scope:
-        feature_data = tf.placeholder(tf.float32, [args.batch_size, args.sequence_length, num_features])
-        actual_classes = tf.placeholder(tf.float32, [args.batch_size, num_classes])
-
-    # Create Grid2LSTM
-    lstm_cell = grid_rnn.Grid2LSTMCell(args.num_hidden)  ## Ok, grid doesn't seem to work with dynamic_rnn
-
-    # inputs: input Tensor, 2D, batch x input_size. Or None
-    #      state: state Tensor, 2D, batch x state_size. Note that state_size =
-    #        cell_state_size * recurrent_dims
-    #      scope: VariableScope for the created subgraph; defaults to "GridRNNCell".
-    logger.debug('LSTM input size: %s' % lstm_cell.input_size)
-    logger.debug('LSTM output size: %s' % lstm_cell.output_size)
-    logger.debug('LSTM state size: %s' % lstm_cell.state_size)
-    lstm_output_size = lstm_cell.output_size
-
-    # Create multiple layers
-    lstm_cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell] * args.num_layers)
-
-    initial_state = state = lstm_cell.zero_state(batch_size, tf.float32)
-    outputs = []
-
-    with tf.variable_scope('LSTM_Grid') as scope:
-        for i in range(sequence_length):
-            if i > 0: tf.get_variable_scope().reuse_variables()
-            output, state = lstm_cell(feature_data[:, i, :], state)
-        last_output = output
-
-    # Feed the output of the LSTM into a softmax layer
-    with tf.name_scope('Softmax') as scope:
-        weights = tf.Variable(tf.truncated_normal([lstm_output_size, num_classes], stddev=0.01))
-        biases = tf.Variable(tf.ones([num_classes]))
-        logits = tf.matmul(last_output, weights) + biases
-        model = tf.nn.softmax(logits)
-
-    with tf.name_scope('Cost_Evaluation') as scope:
-        # Use weighted cross entropy cost function since our dataset is relatively sparse.
-        # We need to be able to dial in the penalty of missing a positive classification
-        # so that the model doesn't always predict negatives.
-        loss = tf.nn.weighted_cross_entropy_with_logits(logits, actual_classes, args.pos_weight, name='Weighted_cross_entropy')
-        cost = tf.reduce_sum(loss) / batch_size
-        #cost = tf.reduce_sum(loss)
-
-    # Dimensions (assuming num_classes=2, hidden_size=24)
-    # actual_classes has shape [batch_size, 2] where the 2 y columns are y_pos and y_neg
-    # weights: [24, 2], seeded by random distribution
-    # biases [2]
-    # what is shape of model?
-    # output*weights is [batch_size x 24] X [24, 2] --> [batch_size x 2]
-    with tf.name_scope('Optimizer') as scope:
-        # Create an Adam optimizer and connect it to the cost function node
-        tvars = tf.trainable_variables()
-        grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),args.max_grad_norm)
-        optimizer = tf.train.AdamOptimizer(args.learning_rate)
-        gradients = zip(grads, tvars)
-        training_step = optimizer.apply_gradients(gradients)
-
-    with tf.name_scope('Accuracy_Evaluation') as scope:
-        # Add ops to evaluate accuracy
-        correct_prediction = tf.equal(tf.argmax(model, 1), tf.argmax(actual_classes, 1))
-        accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
-        cost_summary = tf.scalar_summary("cost", cost)
-        training_summary = tf.scalar_summary("training_accuracy", accuracy)
-
-    # Initialize the session
-    session = tf.Session()
+    # Init - TODO -- make sure we do this on load as well
     init = tf.global_variables_initializer()
     session.run(init)
-
-    writer = tf.train.SummaryWriter(os.path.join(args.output_dir, args.description), session.graph)
+    writer = tf.summary.FileWriter(os.path.join(args.output_dir, args.description), session.graph)
 
     # Train the model
     logger.info('Training model...')
@@ -404,19 +394,20 @@ def train_and_test(arguments):
     for i in range(args.num_epochs):
         # TODO - figure out why the tensorboard is showing that we stop at ~800 samples. Is repeat not working?
         X_batch, y_batch = helper.next_batch('train', repeat=True, verbose=False, rotate=False)
+        #import pdb; pdb.set_trace()
         session.run(
-            training_step,
+            classifier.training_step,
             feed_dict={
-              feature_data: X_batch,
-              actual_classes: y_batch
+              classifier.feature_data: X_batch,
+              classifier.actual_classes: y_batch
         })
         if i%200 == 1:
             # Log cost function to TensorBoard
             cost_summ, training_summ = session.run(
-                [cost_summary, training_summary],
+                [classifier.cost_summary, classifier.training_summary],
                 feed_dict={
-                  feature_data: X_batch,
-                  actual_classes: y_batch
+                  classifier.feature_data: X_batch,
+                  classifier.actual_classes: y_batch
             })
             writer.add_summary(cost_summ, i)
             writer.add_summary(training_summ, i)
@@ -437,9 +428,9 @@ def train_and_test(arguments):
         if (X_batch is None) or (y_batch is None):
             break
 
-        tp, tn, fp, fn = evaluate_performance(model, y_batch, session, feed_dict={
-              feature_data: X_batch,
-              actual_classes: y_batch
+        tp, tn, fp, fn = evaluate_performance(classifier.classes, y_batch, session, feed_dict={
+              classifier.feature_data: X_batch,
+              classifier.actual_classes: y_batch
         })
         scores[0] += tp; scores[1] += tn; scores[2] += fp; scores[3] += fn
         del X_batch
@@ -461,9 +452,9 @@ def train_and_test(arguments):
         if (X_batch is None) or (y_batch is None):
             break
 
-        tp, tn, fp, fn = evaluate_performance(model, y_batch, session, feed_dict={
-              feature_data: X_batch,
-              actual_classes: y_batch
+        tp, tn, fp, fn = evaluate_performance(classifier.classes, y_batch, session, feed_dict={
+              classifier.feature_data: X_batch,
+              classifier.actual_classes: y_batch
         })
         scores[0] += tp; scores[1] += tn; scores[2] += fp; scores[3] += fn
         #print(scores)
@@ -477,13 +468,106 @@ def train_and_test(arguments):
     for k in mets.keys():
         results['test'][k] = mets[k]
 
-    session.close()
-    del helper
+    if args.predict:
+        logger.info('Testing predict()')
+        helper.rewind()
+        X_batch, y_batch = helper.next_batch('train', repeat=False, verbose=False, rotate=False)
+
+        classes, scores = session.run([classifier.classes, classifier.scores],
+            feed_dict={classifier.feature_data: X_batch})
+
+        logger.info('[Actuals, Predicted Classes, Scores]')
+        for row in zip(y_batch, classes, scores):
+            logger.info(row)
+
+    # Save model
+    #if 'F1' in results['test'].keys() and results['test']['F1'] > 0.20:
+    logger.info('Exporting model...')
+    classifier.export(session, args.output_dir, args.description)
 
     return results
 
-def main(args):
-    train_and_test(args)
+def main(arguments):
+    # Load arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--description', type=str, default='%s' % datetime.datetime.now().isoformat(),
+                        help='descriptive name for this particular run')
+    parser.add_argument('--output_dir', type=str, default='log',
+                        help='directory to store logs and models')
+    parser.add_argument('--saved_model_dir', type=str, default=None,
+                        help='if specified will load saved model from given directory')
+    parser.add_argument('--num_classes', type=int, default=2,
+                        help='number of classes in the dataset - note these will be the first columns')
+    parser.add_argument('--num_hidden', type=int, default=100,
+                        help='size of RNN hidden state')
+    parser.add_argument('--num_layers', type=int, default=2,
+                        help='number of layers in the RNN')
+    parser.add_argument('--batch_size', type=int, default=200,
+                        help='minibatch size')
+    parser.add_argument('--sequence_length', type=int, default=20,
+                        help='RNN sequence length')
+    parser.add_argument('--num_epochs', type=int, default=5000,
+                        help='number of epochs')
+    parser.add_argument('--max_grad_norm', type=float, default=5.,
+                        help='clip gradients at this value')
+    parser.add_argument('--pos_weight', type=float, default=0.03,
+                        help='weight for positive classification in cross-entropy loss')
+    parser.add_argument('--learning_rate', type=float, default=5e-3,
+                        help='eta passed to optimizer constructor')
+    parser.add_argument('--fake', dest='fake', action='store_true', default=False)
+    parser.add_argument('--predict', dest='predict', action='store_true', default=False)
+    parser.add_argument('csvfiles', nargs='+',
+                        help='csv file(s) containing training data')
+    args = parser.parse_args(arguments)
+
+    # Configure Logging
+    if not os.path.exists(args.output_dir):
+        os.mkdir(args.output_dir)
+    fh = logging.FileHandler(os.path.join(args.output_dir, 'gridlstm_%s.log' % args.description.replace(' ','_')))
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    logger.setLevel(logging.INFO)
+
+    # CSV file debug logging
+    for k, v in vars(args).items():
+        if k != 'csvfiles':
+            logger.debug('%s: %s' % (k, v))
+    logger.debug('csv files:')
+    for csv in args.csvfiles:
+        logger.debug(csv)
+    logger.debug('end of csv files')
+
+    # Initialize session
+    session = tf.Session()
+
+    # Create a BatchDataHelper object to process CSV files
+    helper = BatchDataHelper(args.csvfiles, args.batch_size, args.sequence_length, num_classes=args.num_classes)
+
+    # If we're in --predict mode, load saved model and run inference
+    if args.predict and args.saved_model_dir:
+        # Load saved model
+        logger.info('Loading saved model...')
+
+        pb = saved_model_loader.load(session, [tag_constants.SERVING], args.saved_model_dir)
+
+        feature_data = session.get_variable('feature_data')
+        model = session.get_variable('model')
+
+        helper.rewind()
+        X_batch, y_batch = helper.next_batch('train', repeat=False, verbose=False, rotate=False)
+
+        predictions = predict(model, session, feed_dict={feature_data: X_batch})
+        logger.info('[Actuals, Predictions]')
+        for row in zip(y_batch, predictions):
+            logger.info(row)
+
+    # Training mode
+    else:
+        train_and_test(session, args, helper)
+
+    session.close()
+    del helper
 
 if __name__ == '__main__':
     import sys
