@@ -354,6 +354,8 @@ class TimeSeriesClassifier:
             session, [tag_constants.SERVING],
             signature_def_map={
                 'classify': classification_signature,
+                signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY:
+                    classification_signature
             })
         builder.save()
 
