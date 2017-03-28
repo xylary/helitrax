@@ -163,8 +163,8 @@ class BatchDataHelper:
 
 
 
-def evaluate_performance(model, actual_classes, session, feed_dict):
-    predictions = tf.argmax(model, 1)
+def evaluate_performance(classes, actual_classes, session, feed_dict):
+    predictions = classes
     actuals = tf.argmax(actual_classes, 1)
 
     ones_like_actuals = tf.ones_like(actuals)
@@ -290,15 +290,16 @@ class TimeSeriesClassifier:
         with tf.name_scope('Softmax') as scope:
             weights = tf.Variable(tf.truncated_normal([lstm_output_size, args.num_classes], stddev=0.01))
             biases = tf.Variable(tf.ones([args.num_classes]))
-            scores = tf.matmul(last_output, weights) + biases
-            classes = tf.nn.softmax(scores)
+            logits = tf.matmul(last_output, weights) + biases
+            scores = tf.nn.softmax(logits)
+            classes = tf.argmax(scores, 1)
 
         with tf.name_scope('Cost_Evaluation') as scope:
             # Use weighted cross entropy cost function since our dataset is relatively sparse.
             # We need to be able to dial in the penalty of missing a positive classification
             # so that the model doesn't always predict negatives.
             #loss = tf.nn.weighted_cross_entropy_with_logits(logits, actual_classes, args.pos_weight, name='Weighted_cross_entropy')
-            loss = tf.losses.sigmoid_cross_entropy(actual_classes, scores, weights=args.pos_weight)
+            loss = tf.losses.sigmoid_cross_entropy(actual_classes, logits, weights=args.pos_weight)
             cost = tf.reduce_mean(loss)
 
         # Dimensions (assuming num_classes=2, hidden_size=24)
@@ -317,7 +318,7 @@ class TimeSeriesClassifier:
 
         with tf.name_scope('Accuracy_Evaluation') as scope:
             # Add ops to evaluate accuracy
-            correct_prediction = tf.equal(tf.argmax(classes, 1), tf.argmax(actual_classes, 1))
+            correct_prediction = tf.equal(tf.argmax(scores, 1), tf.argmax(actual_classes, 1))
             accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
             cost_summary = tf.summary.scalar("cost", cost)
             training_summary = tf.summary.scalar("training_accuracy", accuracy)

@@ -3,6 +3,7 @@ import threading
 from grpc.beta import implementations
 import numpy as np
 import tensorflow as tf
+import tensorflow.contrib.util as util
 sys.path.append('/serving/bazel-bin/tensorflow_serving/model_servers/tensorflow_model_server_test_client.runfiles/tf_serving/')
 from tensorflow.python.saved_model import signature_constants
 from tensorflow.python.saved_model import tag_constants
@@ -54,10 +55,11 @@ def do_inference(hostport, work_dir, concurrency, X, batch_size=200):
         request.inputs[signature_constants.CLASSIFY_INPUTS].CopyFrom(
             tf.contrib.util.make_tensor_proto(X, dtype=dtypes.float32, shape=[20, 200, 79]))
         result = stub.Predict(request, 100.0)
-        print(result)
-        results.append(result)
+        ary = util.make_ndarray(result.outputs['classes'])
+        return ary
+        results.append(ary)
 
-    return np.stack(results)
+    return np.concatenate(results)
 
 
 
@@ -67,7 +69,9 @@ def main(_):
         return
     if FLAGS.test:
         helper = BatchDataHelper(['REGN.csv'], FLAGS.batch_size, FLAGS.sequence_length)
-        X, y = helper.next_batch('train')
+        #_, _ = helper.next_batch('train')
+        X, y = helper.next_batch('test')
+
     else:
         if not FLAGS.inputfile:
             print('please specify input data file')
@@ -80,6 +84,25 @@ def main(_):
 
     results = do_inference(FLAGS.server, FLAGS.work_dir,
         FLAGS.concurrency, X, FLAGS.batch_size)
+    if y is not None:
+        predictions = results
+        tp = 0
+        tn = 0
+        fp = 0
+        fn = 0
+        for i in range(len(y)):
+            if y[i][1] == 1:
+                if predictions[i] == 1:
+                    tp += 1
+                else:
+                    fn += 1
+            if y[i][1] == 0:
+                if predictions[i] == 1:
+                    fp += 1
+                else:
+                    tn += 1
+        print('tp=%d, tn=%d, fp=%d, fn=%d' % (tp, tn, fp, fn))
+
 
 if __name__ == '__main__':
   tf.app.run()
