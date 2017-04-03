@@ -4,6 +4,7 @@ from grpc.beta import implementations
 import numpy as np
 import glob
 import logging
+import json
 import progressbar
 import tensorflow as tf
 import tensorflow.contrib.util as util
@@ -31,8 +32,8 @@ tf.app.flags.DEFINE_string('server', '', 'PredictionService host:port')
 tf.app.flags.DEFINE_string('work_dir', '/tmp', 'Working directory. ')
 tf.app.flags.DEFINE_string('command', 'inference', 'Command to run. Valid commands: inference, backtest, test')
 
-tf.app.flags.DEFINE_string('inputfile', '', 'Data intput filename')
-tf.app.flags.DEFINE_string('tickerfile', '', 'Ordered list of tickers matching input')
+tf.app.flags.DEFINE_string('inputfile', '', 'JSON input filename')
+
 FLAGS = tf.app.flags.FLAGS
 
 def do_inference(hostport, work_dir, concurrency, X, batch_size=200, y=None):
@@ -159,22 +160,25 @@ def main(_):
 
     elif command == 'inference':
         if not FLAGS.inputfile:
-            print('please specify input data file')
-            return
-        if not FLAGS.tickerfile:
-            print('please specify ticker file')
+            print('please specify input json file')
             return
 
-        X = np.load(FLAGS.inputfile)
-        fp = open(FLAGS.tickerfile)
-        tickers = [l.strip() for l in fp.readlines()]
-        fp.close()
-        predictions = do_inference(FLAGS.server, FLAGS.work_dir,
-            FLAGS.concurrency, X, FLAGS.batch_size)
+        # Load metadata file
+        with open(FLAGS.inputfile) as f:
+            metadata = json.load(f)
 
-        if FLAGS.inputfile and FLAGS.tickerfile and tickers:
-            for i in range(len(tickers)):
-                print('%5s: %d' % (tickers[i], predictions[i]))
+        if not metadata.has_key('numpy_datafile'):
+            print('Error! missing key "numpy_datafile"')
+            return 1
+        X = np.load(str(metadata['numpy_datafile']))
+        tickers = [str(t) for t in metadata['tickers']]
+        predictions, _ = do_inference(FLAGS.server, FLAGS.work_dir,
+            FLAGS.concurrency, X, FLAGS.batch_size) # Note - not providing y,
+                                                    # so drop scores in return
+        #print('shape predictions: %s' % predictions.shape)
+        #print('len(tickers)=%d' % len(tickers))
+        for i in range(len(tickers)):
+            print('%5s: %d' % (tickers[i], predictions[i]))
 
     elif command =='backtest':
         # Expects preprocessed csvs in folder "csv"
