@@ -31,6 +31,7 @@ class BatchDataHelper:
         self.sequence_length = sequence_length
         self.num_classes = num_classes
         self.num_features = 0
+        self.num_batches = 0
 
         assert(len(csvfiles) > 0), logger.error('Empty list of csvfiles')
 
@@ -42,13 +43,13 @@ class BatchDataHelper:
         for csv in csvfiles:
             df = pd.read_csv(csv, index_col=0)
 
-            # Truncate to batch size
-            # TODO - remove silent truncation -- perhaps add a warning and
-            # do this during the data prep pipeline
+            # Truncate to multiple of batch size. (Chop from front)
+            # TODO - fix silent truncation
             chop = df.shape[0] % (batch_size + sequence_length)
-            df = df[:-chop]
+            #df = df[:-chop]
+            df = df[chop:]
             y_pos_counts[csv] = df['ypos'].sum()
-
+            self.num_batches += len(df) / batch_size
             # Split into train & test. Note - these are different time series so
             # we need to keep them separate. We will batch them in order.
             training_set_size = int((int(len(df) * train_pct) / batch_size) * batch_size)
