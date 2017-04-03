@@ -9,6 +9,7 @@ import datetime
 import keyring
 import numpy as np
 import pandas as pd
+import json
 import progressbar
 import feature_extraction
 
@@ -59,6 +60,9 @@ def main():
     tickers = [i[0] for i in lines]
     #logging.info(tickers)
 
+    metadata = {}
+    metadata['sequence_length'] = sequence_length
+    metadata['batch_size'] = batch_size
     tickers = sorted(tickers)
 
     pw = keyring.get_password('tdameritrade','dgregknopf')
@@ -69,21 +73,32 @@ def main():
     dfs = get_price_history(td, tickers)
 
     # Extract features and drop initial columns
+    timestamps = {}
     for key, df in dfs.items():
-        df = feature_extraction.add_features(df, prune=False)
-
+        df = feature_extraction.add_features(df, prune=True)
+        df = df[-sequence_length:] # keep only the last set of observations
+        ts = sorted(['%s' % v for v in df['timestamp'].values])
         df.drop('timestamp', axis=1, inplace=True)
         df.drop('open', axis=1, inplace=True)
         df.drop('high', axis=1, inplace=True)
         df.drop('low', axis=1, inplace=True)
         df.drop('close', axis=1, inplace=True)
         df.drop('volume', axis=1, inplace=True)
-
-        dfs[key] = df[:sequence_length]
+        dfs[key] = df
+        timestamps[key] = ts
         #dfs[key].to_csv('newdata/%s.csv' % key)
+
+    # Check for unexpected timestamps
+    baseline = timestamps.values()[0]
+    for key, val in timestamps.items():
+        if set(val) != set(baseline):
+            print('Warning!! Unexpected timestamps for ticker %s' % key)
+    metadata['timestamps'] = baseline # indexed by ticker
 
     num_features = dfs.values()[0].shape[1]
     expected_shape = (sequence_length, num_features)
+
+    metadata['num_features'] = num_features
 
     frames = []
     keys = sorted(dfs.keys())
@@ -94,19 +109,21 @@ def main():
             valid.append(key)
         else:
             print('Unexpected shape: %s: %s' % (key, dfs[key].values.shape))
+            #del timestamps[key]  # Don't really need the timestamps but might want for debug
 
     if (len(frames) % batch_size) != 0:
         pad = [np.zeros(frames[0].shape)] * (batch_size - (len(frames) % batch_size))
-        import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
         frames = np.concatenate((frames, pad))
 
     X_input = np.transpose(frames, [1,0,2])
-
+    metadata['tickers'] = valid
     tag = datetime.datetime.now().strftime('%Y%m%d')
-    np.save('X_input_data_%s' % tag, X_input)
-    fp = open('X_input_tickers_%s' % tag, 'w')
-    fp.write('\n'.join(valid))
-    fp.close()
+    npfilename = 'X_input_%s.data' % tag
+    np.save(npfilename, X_input)
+    metadata['numpy_datafile'] = npfilename
+    with open('X_input_%s.metadata.json' % tag, 'w') as outfile:
+        json.dump(metadata, outfile)
 
     #while len(frames) > 0:
     #    X_slice = frames[:batch_size]
