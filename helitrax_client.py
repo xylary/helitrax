@@ -177,8 +177,14 @@ def main(_):
                                                     # so drop scores in return
         #print('shape predictions: %s' % predictions.shape)
         #print('len(tickers)=%d' % len(tickers))
+        output = {}
+        output['startdate'] = metadata['timestamps'][-1]
+        output['predictions'] = {}
         for i in range(len(tickers)):
             print('%5s: %d' % (tickers[i], predictions[i]))
+            output['predictions'][tickers[i]] = predictions[i]
+        with open('predictions.json', 'w') as outfile:
+            json.dump(output, outfile)
 
     elif command =='backtest':
         # Expects preprocessed csvs in folder "csv"
